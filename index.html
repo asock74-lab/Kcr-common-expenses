@@ -151,12 +151,30 @@ const DEFAULT_CATEGORIES = ["Salary","Common EB","Mamul","Pest Control","Diesel"
 const PAYMENT_MODES = ["Cash","UPI","Bank Transfer","Card","Other"];
 const CAT_COLORS = ["#0E4A3F","#C9A227","#7A9E7E","#B5453B","#8C6D46","#3E6E8E","#9B6B9E","#5C7A5E","#A65D3B"];
 
+function migratePettyCash(raw){
+  // New format: array of {id, date, amount, createdAt}. Auto-convert any older
+  // per-month formats so previously saved entries aren't lost.
+  if(Array.isArray(raw)) return raw;
+  const entries = [];
+  Object.keys(raw||{}).forEach(monthKey=>{
+    const v = raw[monthKey];
+    if(v==null) return;
+    if(typeof v === "number"){
+      entries.push({ id: uid(), date: monthKey+"-01", amount: v, createdAt: new Date().toISOString() });
+    } else if(typeof v === "object"){
+      entries.push({ id: uid(), date: v.date || (monthKey+"-01"), amount: Number(v.amount)||0, createdAt: new Date().toISOString() });
+    }
+  });
+  return entries;
+}
+
 const state = {
   tab: "dashboard",
   expenses: JSON.parse(localStorage.getItem("kcr-expenses") || "[]"),
   categories: JSON.parse(localStorage.getItem("kcr-categories") || "null") || DEFAULT_CATEGORIES.slice(),
-  pettyCash: JSON.parse(localStorage.getItem("kcr-petty-cash") || "{}"),
+  pettyCash: migratePettyCash(JSON.parse(localStorage.getItem("kcr-petty-cash") || "[]")),
   editingId: null,
+  pettyCashEditingId: null,
   historyFilter: { search: "", cat: "All", date: "" },
   reportMonth: null,
 };
@@ -164,6 +182,12 @@ const state = {
 function saveExpenses(){ localStorage.setItem("kcr-expenses", JSON.stringify(state.expenses)); }
 function saveCategories(){ localStorage.setItem("kcr-categories", JSON.stringify(state.categories)); }
 function savePettyCash(){ localStorage.setItem("kcr-petty-cash", JSON.stringify(state.pettyCash)); }
+function pettyCashForMonth(monthKey){
+  return state.pettyCash.filter(e=>e.date.slice(0,7)===monthKey).sort((a,b)=> a.date<b.date?1:a.date>b.date?-1:0);
+}
+function pettyCashTotalForMonth(monthKey){
+  return pettyCashForMonth(monthKey).reduce((s,e)=>s+Number(e.amount),0);
+}
 
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function money(n){ return "₹" + Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:0}); }
@@ -281,13 +305,14 @@ function monthCatTotals(monthKey){
 }
 
 function renderPettyCashCard(monthKey, monthTotal){
-  const given = Number(state.pettyCash[monthKey] || 0);
+  const entries = pettyCashForMonth(monthKey);
+  const given = pettyCashTotalForMonth(monthKey);
   if(!given){
     return `
       <div class="card" style="border:1.5px dashed #C6BCA0;background:#FBF8F1;">
         <div class="stat-label">Petty Cash</div>
-        <div style="font-size:13.5px;color:#5A6B65;margin-top:6px;">No amount set for ${monthLabel(monthKey)} yet.</div>
-        <button data-nav="settings" style="margin-top:10px;background:var(--teal);color:#fff;border:none;border-radius:10px;padding:9px 14px;font-size:13px;font-weight:700;">Set this month's amount</button>
+        <div style="font-size:13.5px;color:#5A6B65;margin-top:6px;">No petty cash recorded for ${monthLabel(monthKey)} yet.</div>
+        <button data-nav="settings" style="margin-top:10px;background:var(--teal);color:#fff;border:none;border-radius:10px;padding:9px 14px;font-size:13px;font-weight:700;">Add petty cash</button>
       </div>`;
   }
   const balance = given - monthTotal;
@@ -296,13 +321,14 @@ function renderPettyCashCard(monthKey, monthTotal){
   const low = !over && pct <= 0.15;
   const barPct = Math.max(0, Math.min(100, (monthTotal/given)*100));
   const barColor = over ? "var(--danger)" : low ? "#C9852A" : "var(--teal)";
+  const topUpNote = entries.length > 1 ? ` across ${entries.length} top-ups` : "";
   return `
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;">
         <div>
           <div class="stat-label">Petty Cash · ${monthLabel(monthKey)}</div>
           <div class="stat-value" style="color:${over?'var(--danger)':'var(--teal-dark)'};">${money(balance)}</div>
-          <div class="stat-sub">of ${money(given)} given · ${money(monthTotal)} spent</div>
+          <div class="stat-sub">of ${money(given)} given${topUpNote} · ${money(monthTotal)} spent</div>
         </div>
         ${(over||low) ? `<div style="display:flex;align-items:center;gap:5px;background:${over?'#FBEAE8':'#FDF1DE'};color:${over?'var(--danger)':'#9C6A1E'};padding:5px 10px;border-radius:999px;font-size:11.5px;font-weight:700;white-space:nowrap;">${ICONS.alert} ${over?'Over budget':'Running low'}</div>` : ""}
       </div>
@@ -500,15 +526,22 @@ function renderHistory(){
 /* ---------------- Reports ---------------- */
 function getMonthsList(){
   const set = new Set(state.expenses.map(e=>e.date.slice(0,7)));
+  state.pettyCash.forEach(e=>set.add(e.date.slice(0,7)));
   set.add(todayStr().slice(0,7));
   return Array.from(set).sort().reverse();
 }
 function renderPettyCashReportRows(monthKey, total){
-  const given = Number(state.pettyCash[monthKey] || 0);
-  if(!given) return "";
+  const entries = pettyCashForMonth(monthKey);
+  if(entries.length===0) return "";
+  const given = pettyCashTotalForMonth(monthKey);
   const balance = given - total;
+  const entryLines = entries.slice().sort((a,b)=> a.date<b.date?-1:1).map(e=>{
+    const d = new Date(e.date+"T00:00:00").toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+    return summaryRow(`  · ${d}`, money(e.amount));
+  }).join("");
   return `
-    ${summaryRow("Petty Cash Given", money(given), true)}
+    ${summaryRow("Petty Cash Given (Total)", money(given), true)}
+    ${entries.length>1 ? entryLines : ""}
     ${summaryRow("Petty Cash Remaining", money(balance))}
     <div style="height:1px;background:#F1EBDC;margin:10px 0;"></div>
   `;
@@ -575,9 +608,13 @@ function exportCSV(){
   const rows = [["Date","Category","Description","Paid By","Payment Mode","Amount"]];
   monthExpenses.forEach(e=>rows.push([e.date,e.category,e.description||"",e.paidBy||"",e.paymentMode,e.amount]));
   rows.push([]); rows.push(["Total","","","","",total]);
-  const given = Number(state.pettyCash[month] || 0);
-  if(given){
-    rows.push(["Petty Cash Given","","","","",given]);
+  const pcEntries = pettyCashForMonth(month);
+  if(pcEntries.length){
+    const given = pettyCashTotalForMonth(month);
+    pcEntries.slice().sort((a,b)=> a.date<b.date?-1:1).forEach(e=>{
+      rows.push([`Petty Cash Received (${e.date})`,"","","","",e.amount]);
+    });
+    rows.push(["Petty Cash Given (Total)","","","","",given]);
     rows.push(["Petty Cash Remaining","","","","",given-total]);
   }
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
@@ -591,7 +628,11 @@ function exportCSV(){
 function renderSettings(){
   const months = getMonthsList();
   const settingsMonth = state.settingsPettyCashMonth || months[0];
-  const currentVal = state.pettyCash[settingsMonth] || "";
+  const entries = pettyCashForMonth(settingsMonth);
+  const monthTotal = pettyCashTotalForMonth(settingsMonth);
+  const editing = state.pettyCashEditingId ? state.pettyCash.find(e=>e.id===state.pettyCashEditingId) : null;
+  const formDate = editing ? editing.date : todayStr();
+  const formAmount = editing ? editing.amount : "";
   return `
     <div class="card">
       <div class="section-title">Petty Cash</div>
@@ -601,12 +642,39 @@ function renderSettings(){
           ${months.map(m=>`<option value="${m}" ${m===settingsMonth?'selected':''}>${monthLabel(m)}</option>`).join("")}
         </select>
       </label>
+
+      ${entries.length>0 ? `
+      <div style="margin-bottom:14px;">
+        <div style="font-size:12.5px;font-weight:700;color:#5A6B65;text-transform:uppercase;margin-bottom:8px;">
+          Received this month · Total ${money(monthTotal)}
+        </div>
+        ${entries.map(e=>`
+          <div class="catrow">
+            <div style="font-size:14px;">
+              ${new Date(e.date+"T00:00:00").toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}
+              <span style="font-weight:700;margin-left:6px;">${money(e.amount)}</span>
+            </div>
+            <div style="display:flex;gap:10px;">
+              <button data-edit-petty="${e.id}" style="background:none;border:none;color:var(--teal-dark);width:15px;height:15px;">${ICONS.edit}</button>
+              <button data-remove-petty="${e.id}" style="background:none;border:none;color:var(--danger);width:15px;height:15px;">${ICONS.trash}</button>
+            </div>
+          </div>`).join("")}
+      </div>` : `<div style="font-size:13.5px;color:#5A6B65;margin-bottom:14px;">No petty cash recorded for ${monthLabel(settingsMonth)} yet.</div>`}
+
+      <div style="font-size:12.5px;font-weight:700;color:#5A6B65;text-transform:uppercase;margin-bottom:8px;">${editing ? "Edit entry" : "Add a top-up"}</div>
       <label class="field" style="margin-bottom:10px;">
-        <div class="field-label">Amount Given This Month</div>
-        <input class="field-input" type="number" min="0" step="0.01" placeholder="e.g. 15000" id="f-petty-amount" value="${esc(currentVal)}" />
+        <div class="field-label">Amount Given</div>
+        <input class="field-input" type="number" min="0" step="0.01" placeholder="e.g. 15000" id="f-petty-amount" value="${esc(formAmount)}" />
       </label>
-      <button id="btn-save-petty" style="background:var(--teal);color:#fff;border:none;border-radius:10px;padding:11px 16px;font-weight:700;font-size:14px;width:100%;">Save Amount</button>
-      <div style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5;">Resets each month — set a new amount whenever management hands over petty cash.</div>
+      <label class="field" style="margin-bottom:10px;">
+        <div class="field-label">Date Received</div>
+        <input class="field-input" type="date" id="f-petty-date" value="${formDate}" />
+      </label>
+      <div style="display:flex;gap:8px;">
+        <button id="btn-save-petty" style="flex:1;background:var(--teal);color:#fff;border:none;border-radius:10px;padding:11px 16px;font-weight:700;font-size:14px;">${editing ? "Update Entry" : "Add Entry"}</button>
+        ${editing ? `<button id="btn-cancel-petty-edit" style="background:#fff;border:1.5px solid #DCD3BF;border-radius:10px;padding:11px 16px;font-weight:700;font-size:14px;">Cancel</button>` : ""}
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5;">Add one entry each time management hands over cash — multiple top-ups in the same month all count toward that month's total.</div>
     </div>
     <div class="card">
       <div class="section-title">Expense Categories</div>
@@ -751,13 +819,39 @@ function attachHandlers(){
   }
 
   if(state.tab==="settings"){
-    document.getElementById("f-petty-month").onchange = (e)=>{ state.settingsPettyCashMonth = e.target.value; render(); };
+    document.getElementById("f-petty-month").onchange = (e)=>{ state.settingsPettyCashMonth = e.target.value; state.pettyCashEditingId=null; render(); };
     document.getElementById("btn-save-petty").onclick = ()=>{
-      const monthSel = document.getElementById("f-petty-month").value;
       const amt = parseFloat(document.getElementById("f-petty-amount").value);
+      const dateVal = document.getElementById("f-petty-date").value;
       if(!amt || isNaN(amt) || amt<=0){ showToast("Enter a valid amount greater than zero","error"); return; }
-      state.pettyCash[monthSel] = amt; savePettyCash(); showToast("Petty cash amount saved"); render();
+      if(!dateVal){ showToast("Please pick the date received","error"); return; }
+      if(state.pettyCashEditingId){
+        state.pettyCash = state.pettyCash.map(e=> e.id===state.pettyCashEditingId ? {...e, amount:amt, date:dateVal} : e);
+        showToast("Petty cash entry updated");
+      } else {
+        state.pettyCash.push({ id: uid(), amount: amt, date: dateVal, createdAt: new Date().toISOString() });
+        showToast("Petty cash entry added");
+      }
+      savePettyCash();
+      state.pettyCashEditingId = null;
+      state.settingsPettyCashMonth = dateVal.slice(0,7);
+      render();
     };
+    const cancelPettyBtn = document.getElementById("btn-cancel-petty-edit");
+    if(cancelPettyBtn) cancelPettyBtn.onclick = ()=>{ state.pettyCashEditingId=null; render(); };
+    document.querySelectorAll("[data-edit-petty]").forEach(btn=>{
+      btn.onclick = ()=>{ state.pettyCashEditingId = btn.dataset.editPetty; render(); };
+    });
+    document.querySelectorAll("[data-remove-petty]").forEach(btn=>{
+      btn.onclick = ()=>{
+        const id = btn.dataset.removePetty;
+        showConfirm("Delete this petty cash entry?", ()=>{
+          state.pettyCash = state.pettyCash.filter(e=>e.id!==id); savePettyCash();
+          if(state.pettyCashEditingId===id) state.pettyCashEditingId=null;
+          render(); showToast("Petty cash entry deleted");
+        });
+      };
+    });
     document.getElementById("btn-add-cat").onclick = ()=>{
       const input = document.getElementById("f-new-cat");
       const name = input.value.trim();
