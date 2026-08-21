@@ -155,6 +155,7 @@ const state = {
   tab: "dashboard",
   expenses: JSON.parse(localStorage.getItem("kcr-expenses") || "[]"),
   categories: JSON.parse(localStorage.getItem("kcr-categories") || "null") || DEFAULT_CATEGORIES.slice(),
+  pettyCash: JSON.parse(localStorage.getItem("kcr-petty-cash") || "{}"),
   editingId: null,
   historyFilter: { search: "", cat: "All", date: "" },
   reportMonth: null,
@@ -162,6 +163,7 @@ const state = {
 
 function saveExpenses(){ localStorage.setItem("kcr-expenses", JSON.stringify(state.expenses)); }
 function saveCategories(){ localStorage.setItem("kcr-categories", JSON.stringify(state.categories)); }
+function savePettyCash(){ localStorage.setItem("kcr-petty-cash", JSON.stringify(state.pettyCash)); }
 
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function money(n){ return "₹" + Number(n||0).toLocaleString("en-IN",{maximumFractionDigits:0}); }
@@ -278,6 +280,38 @@ function monthCatTotals(monthKey){
   return state.categories.map(c=>({name:c,value:map[c]||0})).filter(c=>c.value>0).sort((a,b)=>b.value-a.value);
 }
 
+function renderPettyCashCard(monthKey, monthTotal){
+  const given = Number(state.pettyCash[monthKey] || 0);
+  if(!given){
+    return `
+      <div class="card" style="border:1.5px dashed #C6BCA0;background:#FBF8F1;">
+        <div class="stat-label">Petty Cash</div>
+        <div style="font-size:13.5px;color:#5A6B65;margin-top:6px;">No amount set for ${monthLabel(monthKey)} yet.</div>
+        <button data-nav="settings" style="margin-top:10px;background:var(--teal);color:#fff;border:none;border-radius:10px;padding:9px 14px;font-size:13px;font-weight:700;">Set this month's amount</button>
+      </div>`;
+  }
+  const balance = given - monthTotal;
+  const pct = balance / given;
+  const over = balance < 0;
+  const low = !over && pct <= 0.15;
+  const barPct = Math.max(0, Math.min(100, (monthTotal/given)*100));
+  const barColor = over ? "var(--danger)" : low ? "#C9852A" : "var(--teal)";
+  return `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        <div>
+          <div class="stat-label">Petty Cash · ${monthLabel(monthKey)}</div>
+          <div class="stat-value" style="color:${over?'var(--danger)':'var(--teal-dark)'};">${money(balance)}</div>
+          <div class="stat-sub">of ${money(given)} given · ${money(monthTotal)} spent</div>
+        </div>
+        ${(over||low) ? `<div style="display:flex;align-items:center;gap:5px;background:${over?'#FBEAE8':'#FDF1DE'};color:${over?'var(--danger)':'#9C6A1E'};padding:5px 10px;border-radius:999px;font-size:11.5px;font-weight:700;white-space:nowrap;">${ICONS.alert} ${over?'Over budget':'Running low'}</div>` : ""}
+      </div>
+      <div style="height:8px;background:#EEE6D3;border-radius:999px;margin-top:12px;overflow:hidden;">
+        <div style="height:100%;width:${barPct}%;background:${barColor};border-radius:999px;"></div>
+      </div>
+    </div>`;
+}
+
 function renderDashboard(){
   const today = todayStr(); const thisMonth = today.slice(0,7);
   const lm = new Date(); lm.setMonth(lm.getMonth()-1); const lastMonth = lm.toISOString().slice(0,7);
@@ -308,6 +342,8 @@ function renderDashboard(){
         <div class="stat-sub" style="color:${delta>0?'#B5453B':'#2F7A4F'}">${delta===null?'No prior month data':(delta>0?'+':'')+delta+'% vs last month'}</div>
       </div>
     </div>
+
+    ${renderPettyCashCard(thisMonth, monthTotal)}
 
     ${highest ? `
     <div class="card" style="background:var(--teal-dark);border:none;color:#fff;">
@@ -467,6 +503,17 @@ function getMonthsList(){
   set.add(todayStr().slice(0,7));
   return Array.from(set).sort().reverse();
 }
+function renderPettyCashReportRows(monthKey, total){
+  const given = Number(state.pettyCash[monthKey] || 0);
+  if(!given) return "";
+  const balance = given - total;
+  return `
+    ${summaryRow("Petty Cash Given", money(given), true)}
+    ${summaryRow("Petty Cash Remaining", money(balance))}
+    <div style="height:1px;background:#F1EBDC;margin:10px 0;"></div>
+  `;
+}
+
 function renderReports(){
   const months = getMonthsList();
   if(!state.reportMonth || !months.includes(state.reportMonth)) state.reportMonth = months[0];
@@ -493,6 +540,7 @@ function renderReports(){
 
     <div class="card" id="kcr-report">
       <div class="section-title">${monthLabel(month)} Summary</div>
+      ${renderPettyCashReportRows(month, total)}
       ${monthExpenses.length===0 ? `<div class="empty">${ICONS.alert}<div style="margin-top:8px;">No expenses recorded for this month.</div></div>` : `
         ${summaryRow("Total Common Expenses", money(total), true)}
         ${summaryRow("Number of Transactions", monthExpenses.length)}
@@ -527,6 +575,11 @@ function exportCSV(){
   const rows = [["Date","Category","Description","Paid By","Payment Mode","Amount"]];
   monthExpenses.forEach(e=>rows.push([e.date,e.category,e.description||"",e.paidBy||"",e.paymentMode,e.amount]));
   rows.push([]); rows.push(["Total","","","","",total]);
+  const given = Number(state.pettyCash[month] || 0);
+  if(given){
+    rows.push(["Petty Cash Given","","","","",given]);
+    rows.push(["Petty Cash Remaining","","","","",given-total]);
+  }
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob = new Blob([csv],{type:"text/csv"});
   const url = URL.createObjectURL(blob);
@@ -536,7 +589,25 @@ function exportCSV(){
 
 /* ---------------- Settings ---------------- */
 function renderSettings(){
+  const months = getMonthsList();
+  const settingsMonth = state.settingsPettyCashMonth || months[0];
+  const currentVal = state.pettyCash[settingsMonth] || "";
   return `
+    <div class="card">
+      <div class="section-title">Petty Cash</div>
+      <label class="field" style="margin-bottom:10px;">
+        <div class="field-label">Month</div>
+        <select class="field-input" id="f-petty-month">
+          ${months.map(m=>`<option value="${m}" ${m===settingsMonth?'selected':''}>${monthLabel(m)}</option>`).join("")}
+        </select>
+      </label>
+      <label class="field" style="margin-bottom:10px;">
+        <div class="field-label">Amount Given This Month</div>
+        <input class="field-input" type="number" min="0" step="0.01" placeholder="e.g. 15000" id="f-petty-amount" value="${esc(currentVal)}" />
+      </label>
+      <button id="btn-save-petty" style="background:var(--teal);color:#fff;border:none;border-radius:10px;padding:11px 16px;font-weight:700;font-size:14px;width:100%;">Save Amount</button>
+      <div style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5;">Resets each month — set a new amount whenever management hands over petty cash.</div>
+    </div>
     <div class="card">
       <div class="section-title">Expense Categories</div>
       <div style="margin-bottom:14px;">
@@ -680,6 +751,13 @@ function attachHandlers(){
   }
 
   if(state.tab==="settings"){
+    document.getElementById("f-petty-month").onchange = (e)=>{ state.settingsPettyCashMonth = e.target.value; render(); };
+    document.getElementById("btn-save-petty").onclick = ()=>{
+      const monthSel = document.getElementById("f-petty-month").value;
+      const amt = parseFloat(document.getElementById("f-petty-amount").value);
+      if(!amt || isNaN(amt) || amt<=0){ showToast("Enter a valid amount greater than zero","error"); return; }
+      state.pettyCash[monthSel] = amt; savePettyCash(); showToast("Petty cash amount saved"); render();
+    };
     document.getElementById("btn-add-cat").onclick = ()=>{
       const input = document.getElementById("f-new-cat");
       const name = input.value.trim();

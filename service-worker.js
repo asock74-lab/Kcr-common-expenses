@@ -1,6 +1,6 @@
 // KCR Expenses App — service worker
 // Bump this version whenever app files change, to force clients to refresh their cache.
-const CACHE_VERSION = "kcr-expenses-v1";
+const CACHE_VERSION = "kcr-expenses-v3";
 
 const APP_SHELL = [
   "./",
